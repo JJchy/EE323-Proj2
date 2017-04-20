@@ -21,8 +21,9 @@
 #include <sys/wait.h>
 #include <signal.h>
 #define BACKLOG 10   // how many pending connections queue will hold
-#define PACKETSIZE 1024     // maximum of capacity of one time transmission
 #define MAXDATASIZE 1000000 // maximum of file capacity
+#define REQUESTMAX 50
+#define LINESIZE 1000
 
 // check_port_number : check command line correctness
 // ./server -p PORTNUM
@@ -50,7 +51,43 @@ void check_port_number (int argc, char** argv)
     exit (1);
   }
 }
+
+int check_request (char* message, char* method, char* url, \
+                   char* version, char* host)
+{
+  char buff[REQUESTMAX][LINESIZE];
+  char* temp;
+  int i = 0;
   
+  memset (buff[0], 0, LINESIZE);
+  temp = strtok (message, "\n");
+  do
+  {
+    strncpy (buff[i++], temp, LINESIZE);
+    memset (buff[i], 0, LINESIZE);
+    temp = strtok (message, "\n");
+    if (i == REQUESTMAX) 
+      return 1;
+  } while (temp != NULL);
+
+  temp = NULL;
+
+  sscanf (buff[0], "%s %s %s %s", method, url, version, temp);
+  if ((strcmp (method, "GET") != 0) && (strcmp (method, "HEAD") != 0) &&\
+      (strcmp (method, "POST") != 0) && (strcmp (method, "PUT") != 0) &&\
+      (strcmp (method, "DELETE") != 0))
+    return 2;
+  // but, we not consider to send head, post, put, and delete method
+  if ((strcmp (version, "HTTP/1.0") != 0) && (strcmp (version, "HTTP/1.1")))
+    return 3;
+  // but, we not consider to send HTTP/1.1
+  if (strlen (temp) != 0)
+    return 4;
+
+  sscanf (buff[1], "Host: %s", host);
+  return 0;
+}
+
 // main : make server which listen to client's messages
 int main (int argc, char** argv)
 {
@@ -61,10 +98,16 @@ int main (int argc, char** argv)
   struct sockaddr_storage their_addr;
   int yes = 1, success;
   char s[INET6_ADDRSTRLEN];
-  char packet[PACKETSIZE];
   char buff[MAXDATASIZE];
+  char method[LINESIZE], url[LINESIZE], version[LINESIZE], host[LINESIZE];
+  char error_message[LINESIZE];
+  int error;
 
   memset (buff, 0, MAXDATASIZE);
+  memset (method, 0, LINESIZE);
+  memset (url, 0, LINESIZE);
+  memset (version, 0, LINESIZE);
+  memset (host, 0, LINESIZE);
 
   check_port_number (argc, argv);
 
@@ -138,49 +181,24 @@ int main (int argc, char** argv)
     {
       while (1)
       {
-        memset (packet, 0, PACKETSIZE);
-        if ((bytes = recv (new_sockfd, packet, PACKETSIZE, 0)) == -1)
+        if ((bytes = recv (new_sockfd, buff, MAXDATASIZE, 0)) == -1)
         {
           perror ("server : recv\n");
           exit (1);
         }
-        
-        if (bytes == 0) //client is finished.
+      
+        if (bytes == 0)
         {
-          close (new_sockfd);
-          return 0;
+          perror ("server : wrong message");
+          break;
         }
 
-        if (bytes != PACKETSIZE) //last packet is arrived.
+        error = check_request (buff, method, url, version, host);
+        /*switch (error)
         {
+          case 1: strcpy (error,*/
+        printf ("%s\n", buff);
 
-          if (strlen (buff) != 0)
-          {
-            if (!((bytes == 1) && (packet[0] == '\n'))) strcat (buff, packet);
-            strcat (buff, "\0");
-            fputs (buff, stdout);
-            memset (buff, 0, MAXDATASIZE); 
-          }
-
-          else
-          {
-            if (packet[0] == -1) close (new_sockfd); 
-            packet[PACKETSIZE] = '\0';
-            fputs (packet, stdout); 
-          }
-        }
-
-        else //the file is big, so last packet will send after this.
-        { 
-          if (strlen (buff) == 0) strncpy (buff, packet, PACKETSIZE);
-          else strncat (buff, packet, PACKETSIZE);
-
-          if (packet[PACKETSIZE - 1] == -1)
-          {
-            fputs (buff, stdout);
-            memset (buff, 0, strlen (buff));
-          }
-        }
       }
     }
     else close (new_sockfd); // parent process come here
