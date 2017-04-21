@@ -66,6 +66,7 @@ int check_request (char* message, char* method, char* url, \
     strncpy (buff[i++], temp, LINESIZE);
     memset (buff[i], 0, LINESIZE);
     temp = strtok (message, "\n");
+    if (strcmp (temp, "\r\n") == 0) break;
     if (i == REQUESTMAX) 
       return 1;
   } while (temp != NULL);
@@ -81,10 +82,44 @@ int check_request (char* message, char* method, char* url, \
   if ((strcmp (version, "HTTP/1.0") != 0) && (strcmp (version, "HTTP/1.1")))
     return 3;
   // but, we not consider to send HTTP/1.1
-  if (strlen (temp) != 0)
+  if (strlen (temp) == 0)
     return 4;
 
   sscanf (buff[1], "Host: %s", host);
+  return 0;
+}
+
+int check_url (char* url, char* host, int* port, char* path)
+{
+  char protocol[LINESIZE];
+  char host_port[LINESIZE];
+  char host_check[LINESIZE];
+  char port_num[LINESIZE];
+  char* colon;
+  
+  memset (protocol, 0, LINESIZE);
+  memset (host_port, 0, LINESIZE);
+  memset (port_num, 0, LINESIZE);
+
+  sscanf (url, "%s://%s/%s", protocol, host_port, path);
+  //assume that url is protocol://absolute_URI(:port)/path
+
+  *port = 80;
+  colon = strstr (host_port, ":");
+  if (colon != NULL)
+  {
+    sscanf (host_port, "%s:%s", host_check, port_num);
+    for (int i = 0; i < strlen (port_num); i++)
+      if (isdigit (port_num[i]) == 0) return 1;
+    
+    if ((atoi (port_num) > 65536) || (atoi (port_num) < 1))
+      return 1;
+  }
+
+  else strcpy (host_check, host_port);
+
+  if (strcmp (host_check, host) != 0) return 2;
+
   return 0;
 }
 
@@ -100,6 +135,8 @@ int main (int argc, char** argv)
   char s[INET6_ADDRSTRLEN];
   char buff[MAXDATASIZE];
   char method[LINESIZE], url[LINESIZE], version[LINESIZE], host[LINESIZE];
+  char path[LINESIZE];
+  int port;
   char error_message[LINESIZE];
   int error;
 
@@ -179,27 +216,60 @@ int main (int argc, char** argv)
     // We divide big file at packet, and transmit separately.
     if (!fork ()) // child process come here
     {
-      while (1)
+      if ((bytes = recv (new_sockfd, buff, MAXDATASIZE, 0)) == -1)
       {
-        if ((bytes = recv (new_sockfd, buff, MAXDATASIZE, 0)) == -1)
-        {
-          perror ("server : recv\n");
-          exit (1);
-        }
-      
-        if (bytes == 0)
-        {
-          perror ("server : wrong message");
-          break;
-        }
-
-        error = check_request (buff, method, url, version, host);
-        /*switch (error)
-        {
-          case 1: strcpy (error,*/
-        printf ("%s\n", buff);
-
+        perror ("server : recv\n");
+        exit (1);
       }
+      
+      if (bytes == 0)
+      {
+        perror ("server : wrong message");
+        break;
+      }
+
+      error = check_request (buff, method, url, version, host);
+      if (error != 0)
+      {
+        memset (error_message, 0, LINESIZE);
+        if (error == 1) 
+          strcpy (error_message,\
+              "Wrong request : Request message is Too Long\n");
+        else if (error == 2) 
+          strcpy (error_message,\
+              "Wrong request : Request method is Wrong\n");
+        else if (error == 3) 
+          strcpy (error_message,\
+              "Wrong request : Request version is Wrong\n");
+        else strcpy (error_message,\
+            "HTTP/1.0 400 Bad Request\nHost does not exist.\n");
+        send (new_sockfd, error_message, strlen (error_message) + 1, 0);
+        close (new_sockfd);
+        return -1;
+      }
+      
+      error = check_url (url, host, &port, path);
+      if (error != 0)
+      {
+        memset (error_message, 0, LINESIZE);
+        if (error == 1)
+          strcpy (error_message,\
+              "Wrong request : Port Number is wrong\n");
+        else if (error == 2)
+          strcpy (error_message,\
+              "Wrong request : URL Host is different from Host header\n");
+        send (new_sockfd, error_message, strlen (error_message) + 1, 0);
+      }
+
+
+
+
+
+
+
+
+
+        printf ("%s\n", buff);
     }
     else close (new_sockfd); // parent process come here
 
