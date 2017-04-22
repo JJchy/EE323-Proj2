@@ -20,6 +20,7 @@
 #include <arpa/inet.h>
 #include <sys/wait.h>
 #include <signal.h>
+//#include <zlib.h>
 #define BACKLOG 10   // how many pending connections queue will hold
 #define MAXDATASIZE 100000 // maximum of file capacity
 #define REQUESTMAX 50
@@ -28,7 +29,7 @@
 // check_port_number : check command line correctness
 // ./server -p PORTNUM
 // 1024 <= PORTNUM <= 65535
-void check_port_number (int argc, char** argv)
+void check_port_number (int argc, char **argv)
 {
   if (argc != 2)
   {
@@ -52,21 +53,24 @@ void check_port_number (int argc, char** argv)
   }
 }
 
-int check_request (char* message, char* method, char* url, \
-                   char* version, char* host)
+int check_request (char *message, char *method, char *url, \
+                   char *version, char *host, char header[][LINESIZE])
 {
   char buff[REQUESTMAX][LINESIZE];
-  char* temp;
+  char *temp;
   int i = 0;
-  
+ 
   memset (buff[0], 0, LINESIZE);
-  temp = strtok (message, "\n");
+  temp = strtok (message, "\r\n");
+  if (temp == NULL) return 4;
   do
   {
     strncpy (buff[i++], temp, LINESIZE);
+    if (i > 2) strncpy (header[i-3], temp, LINESIZE);
     memset (buff[i], 0, LINESIZE);
-    temp = strtok (message, "\n");
-    if (strcmp (temp, "\r\n") == 0) break;
+    temp = strtok (NULL, "\r\n");
+    if (temp == NULL || strcmp (temp, "\r\n") == 0) 
+      break;
     if (i == REQUESTMAX) 
       return 1;
   } while (temp != NULL);
@@ -74,47 +78,73 @@ int check_request (char* message, char* method, char* url, \
   temp = NULL;
 
   sscanf (buff[0], "%s %s %s %s", method, url, version, temp);
-  if ((strcmp (method, "GET") != 0) && (strcmp (method, "HEAD") != 0) &&\
-      (strcmp (method, "POST") != 0) && (strcmp (method, "PUT") != 0) &&\
-      (strcmp (method, "DELETE") != 0))
+  if ((method == NULL) ||
+      ((strcmp (method, "GET") != 0) && (strcmp (method, "HEAD") != 0) &&\
+       (strcmp (method, "POST") != 0) && (strcmp (method, "PUT") != 0) &&\
+       (strcmp (method, "DELETE") != 0)))
     return 2;
   // but, we not consider to send head, post, put, and delete method
-  if ((strcmp (version, "HTTP/1.0") != 0) && (strcmp (version, "HTTP/1.1")))
+  if ((method == NULL) ||
+      ((strcmp (version, "HTTP/1.0") != 0) && (strcmp (version, "HTTP/1.1"))))
     return 3;
   // but, we not consider to send HTTP/1.1
-  if (strlen (temp) == 0)
+  if (temp != NULL)
     return 4;
 
   sscanf (buff[1], "Host: %s", host);
+  if (host == NULL)
+    return 5;
+
   return 0;
 }
 
-int check_url (char* url, char* host, int* port, char* path)
+int check_url (char *url, char *host, int *port, char *path)
 {
   char protocol[LINESIZE];
   char host_port[LINESIZE];
   char host_check[LINESIZE];
   char port_num[LINESIZE];
-  struct servent* service;
-  char* colon;
+  char copy_url[LINESIZE];
+  struct servent *service;
+  char *colon, *temp, *origin;
   
   memset (protocol, 0, LINESIZE);
   memset (host_port, 0, LINESIZE);
   memset (port_num, 0, LINESIZE);
+  memset (copy_url, 0, LINESIZE);
 
-  sscanf (url, "%s://%s/%s", protocol, host_port, path);
+  strcpy (copy_url, url);
+  origin = copy_url;
+
+  temp = strtok (copy_url, "/");
+  if (temp == NULL) return 1;
+  strcpy (protocol, temp);
+
+  protocol[strlen(protocol) - 1] = '\0';
+
+  temp = strtok (NULL, "/");
+  if (temp == NULL) return 2;
+  strcpy (host_port, temp);
+
+  temp = strtok (NULL, "\0");
+  if (temp == NULL) path = NULL;
+  else strcpy (path, temp);
   //assume that url is protocol://absolute_URI(:port)/path
 
   *port = 80;
   colon = strstr (host_port, ":");
   if (colon != NULL)
   {
-    sscanf (host_port, "%s:%s", host_check, port_num);
+    temp = strtok (host_port, ":");
+    strcpy (host_check, temp);
+
+    temp = strtok (NULL, "\0");
+    strcpy (port_num, temp);
     for (int i = 0; i < strlen (port_num); i++)
-      if (isdigit (port_num[i]) == 0) return 1;
+      if (isdigit (port_num[i]) == 0) return 3;
     
     if ((atoi (port_num) > 65536) || (atoi (port_num) < 1))
-      return 1;
+      return 3;
 
     *port = atoi (port_num);
   }
@@ -122,44 +152,28 @@ int check_url (char* url, char* host, int* port, char* path)
   else if (strcmp (protocol, "http") != 0)
   {
     service = getservbyname (protocol, "tcp");
-    if (service == NULL) return 2;
+    if (service == NULL) return 1;
 
     *port = ntohs(service->s_port);
   } 
 
   else strcpy (host_check, host_port);
 
-  if (strcmp (host_check, host) != 0) return 3;
+  if (strcmp (host_check, host) != 0) return 4;
 
   return 0;
 }
 
 // main : make server which listen to client's messages
-int main (int argc, char** argv)
+int main (int argc, char **argv)
 {
-  int sockfd, new_sockfd, server_sockfd;
+  int sockfd, new_sockfd;
   int bytes, location;
   socklen_t sock_in_size;
   struct addrinfo hints, *servinfo, *p;
   struct sockaddr_storage their_addr;
   int yes = 1, success;
   char s[INET6_ADDRSTRLEN];
-  char buff[MAXDATASIZE];
-  char method[LINESIZE], url[LINESIZE], version[LINESIZE], host[LINESIZE];
-  char path[LINESIZE], port_str[LINESIZE];
-  int port;
-  struct hostent* host_entry;
-  char request_message[LINESIZE];
-  char error_message[LINESIZE];
-  int error;
-
-  memset (buff, 0, MAXDATASIZE);
-  memset (method, 0, LINESIZE);
-  memset (url, 0, LINESIZE);
-  memset (version, 0, LINESIZE);
-  memset (host, 0, LINESIZE);
-  memset (request_message, 0, LINESIZE);
-
   check_port_number (argc, argv);
 
   memset (&hints, 0, sizeof (hints));
@@ -230,20 +244,55 @@ int main (int argc, char** argv)
     // We divide big file at packet, and transmit separately.
     if (!fork ()) // child process come here
     {
-      if ((bytes = recv (new_sockfd, buff, MAXDATASIZE, 0)) == -1)
+      int server_sockfd;
+      char buff[MAXDATASIZE];
+      char temp[LINESIZE];
+      char method[LINESIZE], url[LINESIZE], version[LINESIZE], host[LINESIZE];
+      char path[LINESIZE], port_str[LINESIZE], header[REQUESTMAX][LINESIZE];
+      int port;
+      struct hostent *host_entry;
+      char request_message[LINESIZE];
+      char error_message[LINESIZE];
+      int error;
+
+      memset (buff, 0, MAXDATASIZE);
+      memset (temp, 0, LINESIZE);
+      memset (method, 0, LINESIZE);
+      memset (url, 0, LINESIZE);
+      memset (version, 0, LINESIZE);
+      memset (host, 0, LINESIZE);
+      memset (request_message, 0, LINESIZE);
+      for (int i = 0; i < REQUESTMAX; i++)
+        memset (header[i], 0, LINESIZE);
+
+      while (1)
       {
-        perror ("server : recv\n");
-        exit (1);
-      }
+        if ((bytes = recv (new_sockfd, temp, LINESIZE - 1, 0)) == -1)
+        {
+          perror ("server : recv\n");
+          exit (1);
+        }
      
-      printf ("ASDFASDFw\n");
-      if (bytes == 0)
-      {
-        perror ("server : wrong message");
-        break;
+        if (bytes == 0) return -1;
+        
+        if (bytes == 2) break; // \r\n\
+
+        strcat (buff, temp);
+        if (strstr (buff, "\r\n\r\n") != NULL) break;
+        memset (temp, 0, LINESIZE);
       }
 
-      error = check_request (buff, method, url, version, host);
+      if (strlen (buff) == 2)
+      {
+        memset (error_message, 0, LINESIZE);
+        strcpy (error_message,\
+            "Wrong request : Request message empty\n");
+        send (new_sockfd, error_message, strlen (error_message) + 1, 0);
+        close (new_sockfd);
+        return -1;
+      }
+
+      error = check_request (buff, method, url, version, host, header);
       if (error != 0)
       {
         memset (error_message, 0, LINESIZE);
@@ -256,23 +305,29 @@ int main (int argc, char** argv)
         else if (error == 3) 
           strcpy (error_message,\
               "Wrong request : Request version is Wrong\n");
+        else if (error == 4)
+          strcpy (error_message,\
+              "Wrong request : Request message is Wrong\n");
         else strcpy (error_message,\
             "HTTP/1.0 400 Bad Request\nHost does not exist.\n");
         send (new_sockfd, error_message, strlen (error_message) + 1, 0);
         close (new_sockfd);
         return -1;
       }
-      
+    
       error = check_url (url, host, &port, path);
       if (error != 0)
       {
         memset (error_message, 0, LINESIZE);
         if (error == 1)
           strcpy (error_message,\
-              "Wrong request : Port Number is wrong\n");
+              "Wrong request : Service name is wrong\n");
         else if (error == 2)
           strcpy (error_message,\
-              "Wrong request : Service name is wrong\n");
+              "Wrong request : URL is wrong\n");
+        else if (error == 3)
+          strcpy (error_message,\
+              "Wrong request : Port Number is wrong\n");
         else
           strcpy (error_message,\
               "Wrong request : URL Host is different from Host header\n");
@@ -281,7 +336,6 @@ int main (int argc, char** argv)
         return -1;
       }
 
-      printf ("ASDFASDF\n");
       host_entry = gethostbyname (host);
       if (host_entry == NULL)
       {
@@ -293,7 +347,7 @@ int main (int argc, char** argv)
         return -1;
       }
 
-      if ((server_sockfd = socket (AF_UNSPEC, SOCK_STREAM, 0)) == -1)
+      if ((server_sockfd = socket (AF_INET, SOCK_STREAM, 0)) == -1)
       {
         perror ("server : socket\n");
         close (new_sockfd);
@@ -302,13 +356,15 @@ int main (int argc, char** argv)
 
       memset (&hints, 0, sizeof (hints));
       servinfo = NULL;
-      hints.ai_family = AF_UNSPEC;
+      hints.ai_family = AF_INET;
       hints.ai_socktype = SOCK_STREAM;
       for (int i = 0; host_entry->h_addr_list[i] != NULL; i++)
       {
         sprintf (port_str, "%d", port);
-        if ((success = getaddrinfo (host_entry->h_addr_list[i],\
-                                    port_str, &hints, &servinfo)) != 0)
+        success = getaddrinfo (inet_ntoa(*(struct in_addr*)\
+                                 host_entry->h_addr_list[i]),\
+                               port_str, &hints, &servinfo);
+        if (success != 0)
         {
           memset (error_message, 0, LINESIZE);
           sprintf (error_message,\
@@ -344,8 +400,16 @@ int main (int argc, char** argv)
         return 2;
       }
 
-      sprintf (request_message, "GET /%s HTTP/1.0\r\nHost: %s\r\n\r\n",\
-               path, host);
+      sprintf (request_message,\
+              "GET http://%s/%s HTTP/1.0\r\nHost: %s\r\n",\
+               host, path, host);
+      for (int i = 0; strlen (header[i]) != 0; i++)
+      {
+        memset (temp, 0, LINESIZE);
+        sprintf (temp, "%s\r\n", header[i]);
+        strcat (request_message, temp);
+      }
+      strcat (request_message, "\r\n");
 
       if (send (server_sockfd, request_message,\
                 strlen (request_message) + 1, 0) == -1)
@@ -383,6 +447,8 @@ int main (int argc, char** argv)
           return -1;
         }
       }
+      memset (path, 0, LINESIZE);
+      close (new_sockfd);
     }
     else close (new_sockfd); // parent process come here
 
