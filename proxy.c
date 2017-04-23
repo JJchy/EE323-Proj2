@@ -20,14 +20,19 @@
 #include <arpa/inet.h>
 #include <sys/wait.h>
 #include <signal.h>
-//#include <zlib.h>
+
+/*
+#include "zlib.h"  // if zlib.h is in computer (same folder), 
+#define zlib       // remove comment command. (compression)
+*/
+
 #define BACKLOG 10   // how many pending connections queue will hold
 #define MAXDATASIZE 100000 // maximum of file capacity
-#define REQUESTMAX 50
-#define LINESIZE 1000
+#define REQUESTMAX 50 // maximum line of request message 
+#define LINESIZE 1000 // maximum of line capacity
 
 // check_port_number : check command line correctness
-// ./server -p PORTNUM
+// ./proxy PORTNUM
 // 1024 <= PORTNUM <= 65535
 void check_port_number (int argc, char **argv)
 {
@@ -53,6 +58,11 @@ void check_port_number (int argc, char **argv)
   }
 }
 
+// check_request : check request message correctness
+//                 and parse the message (by parameter)
+// Message : method(GET) URL version(HTTP/1.0)
+//           Host: host
+//           Header ...
 int check_request (char *message, char *method, char *url, \
                    char *version, char *host, char header[][LINESIZE])
 {
@@ -98,6 +108,8 @@ int check_request (char *message, char *method, char *url, \
   return 0;
 }
 
+// check_url : check URL correctness and parse the URL (by parameter)
+// URL : protocol://host(:port)/path
 int check_url (char *url, char *host, int *port, char *path)
 {
   char protocol[LINESIZE];
@@ -164,7 +176,7 @@ int check_url (char *url, char *host, int *port, char *path)
   return 0;
 }
 
-// main : make server which listen to client's messages
+// main : make proxy server which deliver client's request to server
 int main (int argc, char **argv)
 {
   int sockfd, new_sockfd;
@@ -174,6 +186,8 @@ int main (int argc, char **argv)
   struct sockaddr_storage their_addr;
   int yes = 1, success;
   char s[INET6_ADDRSTRLEN];
+
+  // open the port and ready to connect
   check_port_number (argc, argv);
 
   memset (&hints, 0, sizeof (hints));
@@ -241,7 +255,6 @@ int main (int argc, char **argv)
     // server and client are connected.
     // For connection of other clients, Use fork function to perform listening
     // and transmissing at the same time.
-    // We divide big file at packet, and transmit separately.
     if (!fork ()) // child process come here
     {
       int server_sockfd;
@@ -254,7 +267,15 @@ int main (int argc, char **argv)
       char request_message[LINESIZE];
       char error_message[LINESIZE];
       int error;
-
+#ifdef zlib
+      int compress_flag = 0; 
+      uLong compress_size = MAXDATASIZE;
+      char compress_buff[MAXDATASIZE];
+      char compress_result[MAXDATASIZE];
+      char compress_copy[MAXDATASIZE];
+      char compress_message[MAXDATASIZE];
+      char *header_p;
+#endif
       memset (buff, 0, MAXDATASIZE);
       memset (temp, 0, LINESIZE);
       memset (method, 0, LINESIZE);
@@ -265,6 +286,7 @@ int main (int argc, char **argv)
       for (int i = 0; i < REQUESTMAX; i++)
         memset (header[i], 0, LINESIZE);
 
+      // take the message
       while (1)
       {
         if ((bytes = recv (new_sockfd, temp, LINESIZE - 1, 0)) == -1)
@@ -292,6 +314,7 @@ int main (int argc, char **argv)
         return -1;
       }
 
+      // parsing message
       error = check_request (buff, method, url, version, host, header);
       if (error != 0)
       {
@@ -336,6 +359,7 @@ int main (int argc, char **argv)
         return -1;
       }
 
+      // preparing to connect server
       host_entry = gethostbyname (host);
       if (host_entry == NULL)
       {
@@ -400,12 +424,18 @@ int main (int argc, char **argv)
         return 2;
       }
 
+      //make the message to send to server
       sprintf (request_message,\
               "GET http://%s/%s HTTP/1.0\r\nHost: %s\r\n",\
                host, path, host);
       for (int i = 0; strlen (header[i]) != 0; i++)
       {
         memset (temp, 0, LINESIZE);
+#ifdef zlib
+        if (strcmp (header[i],\
+              "Accept-Encoding: gzip, deflate") == 0)
+          compress_flag = 1;
+#endif
         sprintf (temp, "%s\r\n", header[i]);
         strcat (request_message, temp);
       }
@@ -423,7 +453,74 @@ int main (int argc, char **argv)
         return 2;
       }
 
-      while (1)
+#ifdef zlib // If zlib.h can use, proxy server tries compression.
+      if (compress_flag == 1)
+      {
+        memset (compress_buff, 0, MAXDATASIZE);
+        memset (compress_result, 0, MAXDATASIZE);
+        memset (compress_copy, 0, MAXDATASIZE);
+        memset (compress_message, 0, MAXDATASIZE);
+        while (1)
+        {
+          if ((bytes = recv (server_sockfd, buff, MAXDATASIZE-1, 0)) == -1)
+          {
+            memset (error_message, 0, LINESIZE);
+            strcpy (error_message,\
+                "Fail to recevie message from server\n");
+            send (new_sockfd, error_message, strlen (error_message) + 1, 0);
+            close (new_sockfd);
+            close (server_sockfd);
+            return 2;
+          }
+
+          if (bytes == 0) break;
+
+          if (strlen (compress_buff) == 0) strcpy (compress_buff, buff);
+          else strcat (compress_buff, buff);
+        }
+
+        strcpy (compress_copy, compress_buff);
+        header_p = strstr (compress_copy, "\r\n\r\n");
+        *header_p = '\0';
+        
+        if (strstr (compress_copy, "Content_Encoding:") != NULL)
+        {
+          header_p = header_p + 4;
+          strcpy (compress_result, compress_copy);
+          strcpy (compress_message, header_p);
+          memset (compress_copy, 0, MAXDATASIZE);
+          if (compress (compress_copy, &compress_size,\
+                        compress_message, strlen (compress_message)) == Z_OK)
+          {
+            strcat (compress_result, \
+                "\r\nContent_Encoding: gzip,deflate\r\n\r\n");
+            strcat (compress_result, compress_copy);
+
+            if (send (new_sockfd, compress_result, MAXDATASIZE-1, 0) == -1)
+            {
+              perror ("server : Fail to send to cliend\n");
+              close (new_sockfd);
+              return -1;
+            }
+
+            close (new_sockfd);
+            return 0;
+          }
+        }
+
+        if (send (new_sockfd, buff, MAXDATASIZE-1, 0) == -1)
+        {
+          perror ("server : Fail to send to client\n");
+          close (new_sockfd);
+          return -1;
+        }
+
+        close (new_sockfd);
+        return 0;
+      }
+#endif
+
+      while (1) // If not, normally deliver the message.
       {
         memset (buff, 0, MAXDATASIZE);
         if ((bytes = recv (server_sockfd, buff, MAXDATASIZE-1, 0)) == -1)
@@ -447,8 +544,8 @@ int main (int argc, char **argv)
           return -1;
         }
       }
-      memset (path, 0, LINESIZE);
       close (new_sockfd);
+      return 0;
     }
     else close (new_sockfd); // parent process come here
 
@@ -456,10 +553,4 @@ int main (int argc, char **argv)
   }
 
 }
-
-
-
-
-
-
 
